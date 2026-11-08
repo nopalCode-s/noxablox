@@ -126,11 +126,16 @@ local _K = {
     FarmAnchorY = -1,
     BlockThreshold = 200,
     SeedThreshold = 190,
+    RotationBlockMin = 1,
+    RotationSeedLimit = 200,
     BreakX = -1,
     BreakY = -1,
     BreakSec = 60,
-    Drop = false,
-    Keep = 50,
+    StorageWorld = "",
+    StorageTarget = 20,
+    SupplyAt = 0,
+    Drop = true,
+    Keep = 99,
     DropAt = 200,
     DropWorld = "",
     DropX = -1,
@@ -1110,6 +1115,10 @@ _bL.add("Auto Rotasi", _K, {
     "FarmAnchorY",
     "BlockThreshold",
     "SeedThreshold",
+    "RotationBlockMin",
+    "RotationSeedLimit",
+    "StorageWorld",
+    "StorageTarget",
     "Tiles",
     "BreakX",
     "BreakY",
@@ -1121,6 +1130,8 @@ _bL.add("Auto Rotasi", _K, {
     "DropX",
     "DropY",
 })
+-- Migrasi jumlah seed yang disimpan dari default UI lama ke Auto_Factory.
+if _K.Keep == 50 then _K.Keep = 99 end
 _bL.add("Bahasa", _W, {"Saved", "Ask"})
 _W.Lang = (_W.Saved == "en") and "en" or "id"
 local _cy = {T0 = os.clock(), Gems0 = nil, Items = {}, Base = {}}
@@ -4842,7 +4853,10 @@ local _kj = {} do
                 while _D.Running and _D.RunId == _zJ do
                     task.wait(1)
                     local _zL = _dP(_zF.seed)
-                    if not _zF.live() or os.clock() - _zK > _K.BreakSec or _zL > math.max(1, math.floor(_K.SeedThreshold or _zw)) or (_zF.drop and _K.Drop and _zL >= _K.DropAt) or (_zF.breakMode ~= "always" and _zL >= _zv) then
+                    local _seedStop = (_zF.breakMode == "always")
+                        and math.max(1, math.floor(_K.RotationSeedLimit or 200))
+                        or _zv
+                    if not _zF.live() or os.clock() - _zK > _K.BreakSec or _zL >= _seedStop or (_zF.drop and _K.Drop and _zL >= _K.DropAt) then
                         _D.Running = false
                     end
                 end
@@ -4920,11 +4934,7 @@ local _kj = {} do
             if _An == "" then
                 _An = _Ap
             end
-            if _K.DropX < 0 and not _Ao and _An == _Ap then
-                _K.Status = "Posisi drop belum diatur (drop dilewati)"
-                _K.DropOffUntil = os.clock() + 60
-                return
-            end
+            -- Posisi drop opsional: tanpa koordinat, drop di posisi karakter / titik kedatangan.
             _K.Traveling = true
             local _Aq = _An ~= _Ap
             local _Ar, _As = true, nil
@@ -4963,7 +4973,7 @@ local _kj = {} do
                 _bH("Auto Rotasi", _K.Status, 5)
                 _cz.send("pabrik", _K.Status)
             end
-            if _Aq and _Ap ~= "" and _Am() then
+            if _Aq and _Ap ~= "" and _e() then
                 _K.Status = "Pulang ke " .. _Ap
                 local _Az = _zS(_Ap, nil)
                 if not _Az and _Am() then
@@ -4984,10 +4994,226 @@ local _kj = {} do
         local function _AB()
             return _K.BreakX >= 0 and next(_K.Tiles) ~= nil and os.clock() >= (_K.BreakFailUntil or 0)
         end
+
+        -- Mengambil seed dari world storage ketika stok berada di bawah target.
+        -- Format storage: WORLD atau WORLD:DOOR_ID.
+        local function _zY(_seed, _target, _live)
+            local _raw = tostring(_K.StorageWorld or ""):gsub("%s", "")
+            if _raw == "" then
+                _raw = tostring(_K.DropWorld or ""):gsub("%s", "")
+            end
+            if _raw == "" then
+                return false, "Atur World storage seed atau World drop"
+            end
+
+            local _world, _door = string.match(_raw, "^([^:]+):(.+)$")
+            if not _world then
+                _world = _raw
+            end
+            _world = string.upper(_world)
+            if _door == "" then _door = nil end
+
+            local _home = tostring(_K.Home or _L.worldName() or ""):upper()
+            local _before = _dP(_seed)
+            local _failure = nil
+            _K.Traveling = true
+
+            if _L.worldName() ~= _world then
+                _K.Status = "Menuju storage seed " .. _world
+                local _entered, _enterErr = _zS(_world, _door)
+                if not _entered then
+                    _failure = "Gagal masuk storage " .. _world .. ": " .. tostring(_enterErr)
+                end
+            end
+
+            if not _failure and _live() then
+                local _readyAt = os.clock() + 10
+                while _e() and _live() and not _Q.list and os.clock() < _readyAt do
+                    pcall(_gJ)
+                    task.wait(0.25)
+                end
+
+                if not _Q.list then
+                    _failure = "Data drop storage belum terbaca"
+                else
+                    local _visited = {}
+                    while _live() and _dP(_seed) < _target do
+                        local _candidate
+                        for _, _object in ipairs(_Q.list) do
+                            local _uid = tostring(_object.uid or _object)
+                            if not _visited[_uid]
+                                and _object.id == _seed
+                                and (_object.n or 0) > 0
+                                and _hp(_object, os.clock()) then
+                                _candidate = _object
+                                break
+                            end
+                        end
+
+                        if not _candidate then
+                            break
+                        end
+
+                        _visited[tostring(_candidate.uid or _candidate)] = true
+                        _K.Status = ("Mengambil %s dari storage (%d/%d)"):format(
+                            _dM(_seed), _dP(_seed), _target
+                        )
+                        local _tx = math.floor(tonumber(_candidate.x) or -1)
+                        local _ty = math.floor(tonumber(_candidate.y) or -1)
+                        if _tx >= 0 and _ty >= 0 and _xQ(_tx, _ty, 30) and _live() then
+                            task.wait(0.15)
+                            _gZ(_candidate)
+                            task.wait(0.3)
+                        end
+                    end
+                end
+            end
+
+            -- Selalu coba kembali ke world farming sebelum melanjutkan rotasi.
+            if _home ~= "" and _L.worldName() ~= _home and _e() then
+                _K.Status = "Kembali ke world farming " .. _home
+                local _returned, _returnErr = _zS(_home, nil)
+                if not _returned then
+                    _K.Traveling = false
+                    if _K.stop then
+                        _K.stop("Gagal kembali dari storage: " .. tostring(_returnErr))
+                    end
+                    return false, "Gagal kembali ke world farming"
+                end
+            end
+
+            _K.Traveling = false
+            local _gained = _dP(_seed) - _before
+            if _gained > 0 then
+                _K.Status = ("Seed storage +%d (%d/%d)"):format(_gained, _dP(_seed), _target)
+                return true, _gained
+            end
+            return false, _failure or "Seed tidak ditemukan di storage"
+        end
+
         local function _AC(_AD)
             local _AE, _AF = _dP(_AD.seed), _dP(_AD.block)
             _AD.phase = _AD.phase or "panen"
             _K.Phase = _AA[_AD.phase]
+
+            -- Mode rotasi utama mengikuti Auto_Factory:
+            -- PANEN -> BREAK sampai stok block habis / seed mencapai batas
+            -- -> TANAM -> kembali PANEN.
+            if _AD.breakMode == "always" then
+                local _blockTrigger = math.max(1, math.floor(_K.RotationBlockMin or 1))
+                local _seedLimit = math.max(1, math.floor(_K.RotationSeedLimit or 200))
+
+                if _AD.drop and _K.Drop and _AE >= math.max(1, math.floor(_K.DropAt or 200))
+                    and _AE > math.max(0, math.floor(_K.Keep or 99))
+                    and os.clock() >= (_K.DropOffUntil or 0) then
+                    _Aj(_AD.seed, _AE - _K.Keep, _AD.live)
+                    return "drop"
+                end
+
+                if _AD.phase == "panen" then
+                    _ut = _zx(_AD, true, false)
+                    local _harvestState = _vP()
+                    if _harvestState == "idle" then
+                        _AD.idleAt = os.clock()
+                        if _AF >= _blockTrigger and _AB() then
+                            _AD.phase = "break"
+                        elseif _AE > 0 then
+                            _AD.phase = "tanam"
+                        else
+                            _AD.phase = "tunggu"
+                        end
+                        return "next"
+                    end
+                    return _harvestState
+                end
+
+                if _AD.phase == "break" then
+                    if _AF > 0 and _AB() then
+                        local _didBreak = false
+                        local _separate = _K.WorldMode == "separate"
+                        local _breakWorld = tostring(_K.BreakWorld or ""):upper():gsub("%s", "")
+                        if _separate and _breakWorld ~= "" and _L.worldName() ~= _breakWorld then
+                            _K.Traveling = true
+                            _K.Status = "Menuju world break " .. _breakWorld
+                            local _entered = _zS(_breakWorld, nil)
+                            if _entered and _AD.live() then
+                                _didBreak = _zE(_AD)
+                            else
+                                _K.Status = "Gagal masuk world break " .. _breakWorld
+                            end
+                            if _K.Home ~= "" and _L.worldName() ~= _K.Home and _e() then
+                                _K.Status = "Kembali ke world farming " .. _K.Home
+                                local _returned = _zS(_K.Home, nil)
+                                if not _returned then
+                                    _K.Traveling = false
+                                    if _K.stop then
+                                        _K.stop("Gagal kembali ke world farming " .. _K.Home)
+                                    end
+                                    return "idle"
+                                end
+                            end
+                            _K.Traveling = false
+                        else
+                            _didBreak = _zE(_AD)
+                        end
+
+                        if _didBreak then
+                            local _leftBlocks = _dP(_AD.block)
+                            local _leftSeeds = _dP(_AD.seed)
+                            if _leftSeeds >= _seedLimit or _leftBlocks <= 0 then
+                                _AD.phase = (_leftSeeds > 0) and "tanam" or "panen"
+                            else
+                                -- Cek pohon siap lagi sebelum sesi break berikutnya.
+                                _AD.phase = "panen"
+                            end
+                            return "break"
+                        end
+                    end
+
+                    if _AE > 0 then
+                        _AD.phase = "tanam"
+                    else
+                        _AD.phase = "tunggu"
+                    end
+                    return "next"
+                end
+
+                if _AD.phase == "tanam" then
+                    local _seedBeforePlant = _dP(_AD.seed)
+                    if _seedBeforePlant > 0 then
+                        _ut = _zx(_AD, false, true)
+                        local _plantState = _vP()
+                        if _plantState ~= "idle" then
+                            return _plantState
+                        end
+                    end
+                    if _dP(_AD.seed) < _seedBeforePlant then
+                        _AD.phase = "panen"
+                    else
+                        _AD.phase = "tunggu"
+                        _AD.plantAt = os.clock()
+                    end
+                    return "next"
+                end
+
+                local _readyTrees, _nextReady = _zg(_AD.whole)
+                if _readyTrees > 0 and os.clock() - (_AD.idleAt or 0) > 5 then
+                    _AD.phase = "panen"
+                    return "next"
+                end
+                if _AF >= _blockTrigger and _AB() then
+                    _AD.phase = "break"
+                    return "next"
+                end
+                if _AE > 0 and os.clock() - (_AD.plantAt or 0) > 10 then
+                    _AD.plantAt = os.clock()
+                    _AD.phase = "tanam"
+                    return "next"
+                end
+                return "idle", _nextReady
+            end
+
+            -- Jalur bootstrap tetap dipakai Auto Builder.
             if _AD.phase ~= "panen" and _AD.phase ~= "tanam" and _AD.drop and _K.Drop and _AE >= _K.DropAt and _AE > _K.Keep and os.clock() >= (_K.DropOffUntil or 0) then
                 _Aj(_AD.seed, _AE - _K.Keep, _AD.live)
                 return "drop"
@@ -5112,6 +5338,26 @@ local _kj = {} do
                 task.wait()
                 _AS.whole = _K.WholeWorld
                 local _AT = _L.worldName()
+
+                local _storageWorld = tostring(_K.StorageWorld or ""):gsub("%s", "")
+                if _storageWorld == "" then
+                    _storageWorld = tostring(_K.DropWorld or ""):gsub("%s", "")
+                end
+                local _storageTarget = math.max(1, math.floor(_K.StorageTarget or 20))
+                if _storageWorld ~= "" and _dP(_AS.seed) < _storageTarget
+                    and os.clock() >= (_K.SupplyAt or 0) and not _K.Traveling then
+                    _K.SupplyAt = os.clock() + 30
+                    local _beforeSupply = _dP(_AS.seed)
+                    local _supplyOk, _supplyResult = _zY(_AS.seed, _storageTarget, _AR)
+                    if _dP(_AS.seed) <= _beforeSupply and _supplyResult then
+                        _K.Status = tostring(_supplyResult)
+                    end
+                    if not _AR() then
+                        break
+                    end
+                end
+
+                _AT = _L.worldName()
                 if not _K.Traveling and _K.Home ~= "" and _AT ~= _K.Home then
                     _K.Status = "Bukan di world farming (" .. _K.Home .. "), menunggu..."
                     task.wait(2)
@@ -8750,15 +8996,19 @@ end do
     (function()
         local _PB = _ER("Auto Rotasi", "factory", "farm")
         _EI(function()
-            _S.PabrikStatus = _PB:Paragraph({Title = "Status Auto Rotasi", Desc = "-"})
+            _S.PabrikStatus = _PB:Paragraph({
+                Title = "Dashboard Auto Rotasi",
+                Desc = "ALUR: PANEN → BREAK → TANAM → ULANGI\nSupply seed opsional: ambil dari storage saat stok di bawah target.\nDeposit: mulai 200 seed, sisakan 99 seed.",
+            })
         end)
-        local _PC = _EY(_PB, "Kontrol Rotasi", true)
-        local _PD = _EY(_PB, "World & Tile", true)
-        local _PE = _EY(_PB, "Drop seed", false)
+        local _PC = _EY(_PB, "Kontrol & Siklus", true)
+        local _PD = _EY(_PB, "World & Area", true)
+        local _FactorySupplySection = _EY(_PB, "Pasokan Seed", false)
+        local _PE = _EY(_PB, "Drop / Deposit Seed", false)
         _EI(function()
             _S.PabrikToggle = _PC:Toggle({
                 Title = "Jalankan Auto Rotasi",
-                Desc = "Rotasi inventory: break saat block cukup, tanam saat seed cukup, lalu harvest kembali",
+                Desc = "Siklus Auto_Factory: panen → break → tanam → ulangi. Seed storage diambil otomatis bila stok kurang dari target.",
                 Value = false,
                 Callback = function(_PF)
                     if _PF then
@@ -8857,25 +9107,25 @@ end do
         end)
         _EI(function()
             _PC:Input({
-                Title = "Batas block untuk rotasi",
-                Desc = "Jumlah block di inventory sebagai batas pemicu rotasi (default 200).",
-                Value = tostring(_K.BlockThreshold),
-                Placeholder = "200",
+                Title = "Minimum block untuk break",
+                Desc = "Break dimulai saat stok block mencapai jumlah ini. Default 1, mengikuti Auto_Factory.",
+                Value = tostring(_K.RotationBlockMin),
+                Placeholder = "1",
                 Callback = function(_value)
                     local _number = tonumber(_value)
-                    if _number then _K.BlockThreshold = math.clamp(math.floor(_number), 1, 99999) end
+                    if _number then _K.RotationBlockMin = math.clamp(math.floor(_number), 1, 99999) end
                 end,
             })
         end)
         _EI(function()
             _PC:Input({
-                Title = "Batas seed",
-                Desc = "Batas seed inventory sebelum fase tanam/rotasi (default 190).",
-                Value = tostring(_K.SeedThreshold),
-                Placeholder = "190",
+                Title = "Batas seed sebelum tanam",
+                Desc = "Sesi break berhenti saat seed mencapai jumlah ini. Default 200, mengikuti Auto_Factory.",
+                Value = tostring(_K.RotationSeedLimit),
+                Placeholder = "200",
                 Callback = function(_value)
                     local _number = tonumber(_value)
-                    if _number then _K.SeedThreshold = math.clamp(math.floor(_number), 1, 99999) end
+                    if _number then _K.RotationSeedLimit = math.clamp(math.floor(_number), 1, 99999) end
                 end,
             })
         end)
@@ -8956,6 +9206,48 @@ end do
                 end,
             })
         end)
+        _EI(function()
+            _S.FactoryStorageWorldInput = _FactorySupplySection:Input({
+                Title = "World storage seed",
+                Desc = "Isi WORLD atau WORLD:ID. Kosong = memakai World drop sebagai storage seed.",
+                Value = _K.StorageWorld,
+                Placeholder = "STORAGE atau STORAGE:1",
+                Callback = function(_world)
+                    _K.StorageWorld = tostring(_world or ""):upper():gsub("%s", "")
+                end,
+            })
+        end)
+        _EI(function()
+            _FactorySupplySection:Button({
+                Title = "Gunakan world sekarang sebagai storage seed",
+                Desc = "Simpan world aktif sebagai tempat mengambil seed tambahan.",
+                Callback = function()
+                    local _world = _L.worldName()
+                    if _world and _world ~= "" then
+                        _K.StorageWorld = _world
+                        if _S.FactoryStorageWorldInput then
+                            pcall(function()
+                                _S.FactoryStorageWorldInput:Set(_world)
+                            end)
+                        end
+                        _bH("Auto Rotasi", "Storage seed: " .. _world, 3)
+                    else
+                        _bH("Auto Rotasi", "Kamu belum masuk world", 3)
+                    end
+                end,
+            })
+        end)
+        _Ff(_FactorySupplySection, {
+            Title = "Target stok seed",
+            Desc = "Saat stok seed di bawah target, script mencoba mengambil seed dari world storage. Default 20.",
+            Min = 1,
+            Max = 200,
+            Step = 1,
+            Default = _K.StorageTarget,
+            Callback = function(_target)
+                _K.StorageTarget = math.clamp(math.floor(_target), 1, 200)
+            end,
+        })
         _Ff(_PD, {
             Title = "Lama 1 sesi break (detik)",
             Desc = "Setelah ini cek pohon siap dulu",
@@ -8989,7 +9281,7 @@ end do
         })
         _Ff(_PE, {
             Title = "Drop kalau seed sudah",
-            Desc = "Contoh 200 & sisakan 50 = drop 150",
+            Desc = "Default 200 & sisakan 99 = drop 101, seperti Auto_Factory.",
             Min = 2,
             Max = 200,
             Step = 1,
@@ -9012,7 +9304,7 @@ end do
         _EI(function()
             _PE:Button({
                 Title = "Pakai posisi sekarang untuk drop",
-                Desc = "Berdiri di tempat drop (boleh di world lain), lalu tekan",
+                Desc = "Opsional. Tanpa koordinat, drop di posisi karakter atau titik kedatangan world.",
                 Callback = function()
                     local _PQ, _PR = _kj.here()
                     if not _PQ then
@@ -9035,7 +9327,7 @@ end do
         _EI(function()
             _PE:Button({
                 Title = "Hapus posisi drop",
-                Desc = "Drop di titik kedatangan (pintu) saja",
+                Desc = "Hapus koordinat; drop berikutnya memakai posisi karakter / titik kedatangan.",
                 Callback = function()
                     _K.DropX, _K.DropY = -1, -1
                     _bH("Auto Rotasi", "Posisi drop dihapus", 3)
@@ -9055,14 +9347,16 @@ end do
                 local _PY, _PZ = _kj.parseDropTarget()
                 local _Qa = (_PY ~= "" and _PY or "world ini") .. (_PZ and (" pintu " .. _PZ) or "") .. (_K.DropX >= 0 and (" (" .. _K.DropX .. "," .. _K.DropY .. ")") or "")
                 local _Qb = table.concat({
-                    "Status : " .. (_K.Running and ("JALAN - fase " .. tostring(_K.Phase or "-")) or "BERHENTI"),
-                    ("Seed   : %s x%d | block %s x%d"):format(_PW and _dM(_PW) or "-", _PW and _dP(_PW) or 0, _PX and _dM(_PX) or "-", _PX and _dP(_PX) or 0),
-                    ("World  : %s | farm %s | break %s"):format(_K.WorldMode == "separate" and "Separate" or "Same", _K.Home ~= "" and _K.Home or (_K.FarmWorld ~= "" and _K.FarmWorld or "current"), _K.WorldMode == "separate" and (_K.BreakWorld ~= "" and _K.BreakWorld or "belum diatur") or "same world"),
-                    ("Batas  : block %d | seed %d"):format(_K.BlockThreshold or 200, _K.SeedThreshold or 190),
-                    ("Farm   : %d tile | Break: %s | %d tile"):format(_PS(_K.FarmTiles), _K.BreakX >= 0 and ("(" .. _K.BreakX .. "," .. _K.BreakY .. ")") or "belum diatur", _PS(_K.Tiles)),
-                    ("Drop   : %s | sisakan %d, drop saat >= %d"):format(_K.Drop and _Qa or "mati", _K.Keep, _K.DropAt),
-                    ("Hasil  : panen %d | tanam %d | di-drop %d"):format(_K.Harvested, _K.Planted, _K.Dropped),
-                    "Aksi   : " .. _K.Status,
+                    "ALUR    : PANEN → BREAK → TANAM → PANEN",
+                    "STATUS  : " .. (_K.Running and ("JALAN | fase " .. tostring(_K.Phase or "-")) or "BERHENTI"),
+                    ("STOK    : %s x%d | %s x%d"):format(_PW and _dM(_PW) or "-", _PW and _dP(_PW) or 0, _PX and _dM(_PX) or "-", _PX and _dP(_PX) or 0),
+                    ("WORLD   : farm %s | break %s"):format(_K.Home ~= "" and _K.Home or (_K.FarmWorld ~= "" and _K.FarmWorld or "current"), _K.WorldMode == "separate" and (_K.BreakWorld ~= "" and _K.BreakWorld or "belum diatur") or "same world"),
+                    ("AREA    : farm %d tile | break %s (%d tile)"):format(_PS(_K.FarmTiles), _K.BreakX >= 0 and ("(" .. _K.BreakX .. "," .. _K.BreakY .. ")") or "belum diatur", _PS(_K.Tiles)),
+                    ("SUPPLY  : %s | target %d seed"):format((_K.StorageWorld ~= "" and _K.StorageWorld or (_K.DropWorld ~= "" and _K.DropWorld or "off")), _K.StorageTarget or 20),
+                    ("BATAS   : block %d | seed %d"):format(_K.RotationBlockMin or 1, _K.RotationSeedLimit or 200),
+                    ("DEPOSIT : %s | simpan %d | pemicu %d"):format(_K.Drop and _Qa or "off", _K.Keep, _K.DropAt),
+                    ("HASIL   : panen %d | tanam %d | drop %d"):format(_K.Harvested, _K.Planted, _K.Dropped),
+                    "AKSI    : " .. _K.Status,
                 }, "\n")
                 if _S.PabrikStatus and _Qb ~= _K.Shown then
                     _K.Shown = _Qb
